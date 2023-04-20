@@ -132,6 +132,84 @@ class YamlModel(BaseModel):
         yaml_obj = y.load(ss.getvalue())
         return yaml_obj
 
+    def to_yamale_schema(self, output_path: Union[str, TextIO], by_alias: bool = True):
+        """Generate a yamale schema from the Pydantic model.
+
+        Parameters
+        ----------
+        output_path : str or TextIO
+            Path to the schema file to save or a TextIO object to write the schema to.
+        by_alias : bool, default = True
+            Whether to use the alias names for the fields.
+        """
+        schema_lines = []
+
+        def _process_schema_properties(
+            properties, required, prefix="", definitions=None
+        ):
+            if definitions is None:
+                definitions = {}
+
+            for key, val in properties.items():
+                is_reference = False
+
+                if "$ref" in val:
+                    ref_key = val["$ref"].split("/")[-1]
+                    val = definitions.get(ref_key)
+                    is_reference = True
+
+                # import ipdb
+
+                # ipdb.set_trace()
+
+                is_required = key in required
+
+                yamale_type = _pydantic_type_to_yamale(val["type"])
+
+                if is_reference and "properties" in val:
+                    yamale_type = "map"
+                    _process_schema_properties(
+                        val["properties"],
+                        val.get("required", []),
+                        prefix=prefix + "  ",
+                        definitions=definitions,
+                    )
+
+                schema_line = f"{prefix}{key}: {yamale_type}"
+
+                if not is_required:
+                    schema_line += "(required=False)"  # Optional field
+                else:
+                    # todo: other min/max requires introspection to pydantic
+                    schema_line += "()"
+
+                schema_lines.append(schema_line)
+
+        def _pydantic_type_to_yamale(pydantic_type):
+            # Convert Pydantic types to Yamale types
+            type_mapping = {
+                "string": "str",
+                "integer": "int",
+                "number": "num",
+                "boolean": "bool",
+                "array": "list",
+                "object": "map",
+            }
+            return type_mapping.get(pydantic_type, "any")
+
+        schema = self.schema(by_alias=by_alias)
+        _process_schema_properties(
+            schema["properties"],
+            schema.get("required", []),
+            definitions=schema.get("definitions"),
+        )
+
+        if isinstance(output_path, str):
+            with open(output_path, "w") as f:
+                f.write("\n".join(schema_lines))
+        else:
+            output_path.write("\n".join(schema_lines))
+
 
 def _add_comments(
     loaded_yaml: CommentedMap,
