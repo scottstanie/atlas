@@ -158,10 +158,6 @@ class YamlModel(BaseModel):
                     val = definitions.get(ref_key)
                     is_reference = True
 
-                # import ipdb
-
-                # ipdb.set_trace()
-
                 is_required = key in required
 
                 yamale_type = _pydantic_type_to_yamale(val["type"])
