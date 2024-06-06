@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 from numpy.typing import ArrayLike
 
 from dolphin._log import get_log
+from dolphin._types import HalfWindow, Strides
 from dolphin.workflows import ShpMethod
 
 from . import _glrt, _ks
@@ -14,16 +13,18 @@ logger = get_log(__name__)
 
 __all__ = ["estimate_neighbors"]
 
+NO_STRIDES = Strides(1, 1)
+
 
 def estimate_neighbors(
     *,
-    halfwin_rowcol: tuple[int, int],
+    half_window: HalfWindow,
     alpha: float,
-    strides: Optional[dict[str, int]] = None,
-    mean: Optional[ArrayLike] = None,
-    var: Optional[ArrayLike] = None,
-    nslc: Optional[int] = None,
-    amp_stack: Optional[ArrayLike] = None,
+    strides: Strides,
+    mean: ArrayLike | None = None,
+    var: ArrayLike | None = None,
+    nslc: int | None = None,
+    amp_stack: ArrayLike | None = None,
     is_sorted: bool = False,
     method: ShpMethod = ShpMethod.GLRT,
     prune_disconnected: bool = False,
@@ -35,12 +36,12 @@ def estimate_neighbors(
 
     Parameters
     ----------
-    halfwin_rowcol : Tuple[int, int]
+    half_window : tuple[int, int]
         Half window dimensions as a tuple (rows, columns).
     alpha : float
         Significance level (0 < alpha < 1).
-    strides : dict[str, int], optional
-        Strides for the x and y dimensions, by default {"x": 1, "y": 1}.
+    strides : tuple[int, int], optional
+        Strides for the row and col, by default (1, 1)
     mean : Optional[ArrayLike], optional
         Mean of the amplitude stack, by default None.
     var : Optional[ArrayLike], optional
@@ -73,8 +74,6 @@ def estimate_neighbors(
     """
     import numba
 
-    if strides is None:
-        strides = {"x": 1, "y": 1}
     logger.debug(f"NUMBA THREADS: {numba.get_num_threads()}")
 
     if method == ShpMethod.RECT:
@@ -92,7 +91,7 @@ def estimate_neighbors(
         neighbor_arrays = _glrt.estimate_neighbors(
             mean=mean,
             var=var,
-            halfwin_rowcol=halfwin_rowcol,
+            half_window=half_window,
             strides=strides,
             nslc=nslc,
             alpha=alpha,
@@ -105,7 +104,7 @@ def estimate_neighbors(
         logger.debug("Estimating SHP neighbors using KS test")
         neighbor_arrays = _ks.estimate_neighbors(
             amp_stack=amp_stack,
-            halfwin_rowcol=halfwin_rowcol,
+            half_window=half_window,
             strides=strides,
             alpha=alpha,
             is_sorted=is_sorted,

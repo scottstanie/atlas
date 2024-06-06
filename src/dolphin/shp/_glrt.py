@@ -1,29 +1,48 @@
 from __future__ import annotations
 
 import csv
-from functools import lru_cache
+from functools import lru_cache, partial
 from math import log
 from pathlib import Path
-from typing import Optional
 
+import jax.numpy as jnp
 import numba
 import numpy as np
+from jax import Array, jit, lax, vmap
 from numpy.typing import ArrayLike
 
-from dolphin._types import Strides
+from dolphin._types import HalfWindow, Strides
 from dolphin.utils import _get_slices, compute_out_shape
 
 from ._common import remove_unconnected
 
+NO_STRIDES = Strides(1, 1)
+
 _get_slices = numba.njit(_get_slices)
 
 
-def estimate_neighbors(
+@lru_cache
+def _read_cutoff_csv():
+    filename = Path(__file__).parent / "glrt_cutoffs.csv"
+
+    result = {}
+    with open(filename) as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            n = int(row["N"])
+            alpha = float(row["alpha"])
+            cutoff = float(row["cutoff"])
+            result[(n, alpha)] = cutoff
+
+    return result
+
+
+def estimate_neighbors_nb(
     mean: ArrayLike,
     var: ArrayLike,
-    halfwin_rowcol: tuple[int, int],
+    half_window: HalfWindow,
     nslc: int,
-    strides: Optional[dict] = None,
+    strides: Strides = NO_STRIDES,
     alpha: float = 0.05,
     prune_disconnected: bool = False,
 ):
@@ -38,15 +57,14 @@ def estimate_neighbors(
         Mean amplitude of each pixel.
     var: ArrayLike, 2D
         Variance of each pixel's amplitude.
-    halfwin_rowcol : tuple[int, int]
+    half_window: tuple[int, int]
         Half the size of the block in (row, col) dimensions
     nslc : int
         Number of images in the stack used to compute `mean` and `var`.
         Used to compute the degrees of freedom for the t- and F-tests to
         determine the critical values.
-    strides: dict, optional
+    strides: Strides, default=(1, 1)
         The (x, y) strides (in pixels) to use for the sliding window.
-        By default {"x": 1, "y": 1}
     alpha : float, default=0.05
         Significance level at which to reject the null hypothesis.
         Rejecting means declaring a neighbor is not a SHP.
@@ -69,27 +87,24 @@ def estimate_neighbors(
         Shape is (out_rows, out_cols, window_rows, window_cols), where
             `out_rows` and `out_cols` are computed by
             `[dolphin.io.compute_out_shape][]`
-            `window_rows = 2 * halfwin_rowcol[0] + 1`
-            `window_cols = 2 * halfwin_rowcol[1] + 1`
+            `window_rows = 2 * half_window[0] + 1`
+            `window_cols = 2 * half_window[1] + 1`
 
     """
-    if strides is None:
-        strides = {"x": 1, "y": 1}
-    half_row, half_col = halfwin_rowcol
+    half_row, half_col = half_window
     rows, cols = mean.shape
 
     threshold = get_cutoff(alpha=alpha, N=nslc)
 
-    strides_rowcol = (strides["y"], strides["x"])
-    out_rows, out_cols = compute_out_shape((rows, cols), Strides(*strides_rowcol))
+    out_rows, out_cols = compute_out_shape((rows, cols), strides)
     is_shp = np.zeros(
         (out_rows, out_cols, 2 * half_row + 1, 2 * half_col + 1), dtype=np.bool_
     )
     return _loop_over_pixels(
         mean,
         var,
-        halfwin_rowcol,
-        strides_rowcol,
+        half_window,
+        strides,
         threshold,
         prune_disconnected,
         is_shp,
@@ -137,15 +152,15 @@ def _compute_glrt_test_stat(scale_1, scale_2):
 def _loop_over_pixels(
     mean: ArrayLike,
     var: ArrayLike,
-    halfwin_rowcol: tuple[int, int],
-    strides_rowcol: tuple[int, int],
+    half_window: tuple[int, int],
+    strides: tuple[int, int],
     threshold: float,
     prune_disconnected: bool,
     is_shp: np.ndarray,
 ) -> np.ndarray:
     """Loop common to SHP tests using only mean and variance."""
-    half_row, half_col = halfwin_rowcol
-    row_strides, col_strides = strides_rowcol
+    half_row, half_col = half_window
+    row_strides, col_strides = strides
     # location to start counting from in the larger input
     r0, c0 = row_strides // 2, col_strides // 2
     in_rows, in_cols = mean.shape
@@ -190,17 +205,72 @@ def _loop_over_pixels(
     return is_shp
 
 
-@lru_cache
-def _read_cutoff_csv():
-    filename = Path(__file__).parent / "glrt_cutoffs.csv"
+compute_out_shape_jax = jit(compute_out_shape, static_argnames=["shape", "strides"])
 
-    result = {}
-    with open(filename) as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            n = int(row["N"])
-            alpha = float(row["alpha"])
-            cutoff = float(row["cutoff"])
-            result[(n, alpha)] = cutoff
 
-    return result
+@partial(jit, static_argnames=["half_window", "strides", "nslc", "alpha"])
+def estimate_neighbors(
+    mean: ArrayLike,
+    var: ArrayLike,
+    half_window: HalfWindow,
+    nslc: int,
+    strides: Strides = NO_STRIDES,
+    alpha: float = 0.05,
+    prune_disconnected: bool = False,
+) -> Array:
+    """Estimate the number of neighbors based on the GLRT."""
+    # Convert mean/var to the Rayleigh scale parameter
+    rows, cols = mean.shape
+    row_strides, col_strides = strides
+    half_row, half_col = half_window
+
+    in_r_start = row_strides // 2
+    in_c_start = col_strides // 2
+    out_rows, out_cols = compute_out_shape((rows, cols), strides)
+
+    scale_squared = (var + mean**2) / 2
+    threshold = get_cutoff_jax(alpha=alpha, N=nslc)
+
+    def _get_window(arr, r: int, c: int, half_row: int, half_col: int) -> Array:
+        r0 = r - half_row
+        c0 = c - half_col
+        start_indices = (r0, c0)
+
+        rsize = 2 * half_row + 1
+        csize = 2 * half_col + 1
+        slice_sizes = (rsize, csize)
+
+        return lax.dynamic_slice(arr, start_indices, slice_sizes)
+
+    def _process_row_col(out_r, out_c) -> Array:
+        in_r = in_r_start + out_r * row_strides
+        in_c = in_c_start + out_c * col_strides
+
+        scale_1 = scale_squared[in_r, in_c]  # One pixel
+        # and one window for scale 2, will broadcast
+        scale_2 = _get_window(scale_squared, in_r, in_c, half_row, half_col)
+
+        # Compute the GLRT test statistic.
+        scale_pooled = (scale_1 + scale_2) / 2
+        test_stat = 2 * jnp.log(scale_pooled) - jnp.log(scale_1) - jnp.log(scale_2)
+
+        return threshold > test_stat
+
+    # Now make a 2D grid of indices to access all output pixels
+    out_r_indices, out_c_indices = jnp.meshgrid(
+        jnp.arange(out_rows), jnp.arange(out_cols), indexing="ij"
+    )
+
+    # Create the vectorized function in 2d
+    _process_2d = vmap(_process_row_col)
+    # Then in 3d
+    _process_3d = vmap(_process_2d)
+    is_shp = _process_3d(out_r_indices, out_c_indices)
+    # Set middle pixels to zero
+    return is_shp.at[:, :, half_row, half_col].set(False)
+
+
+@partial(jit, static_argnames=["alpha", "N"])
+def get_cutoff_jax(alpha: float, N: int) -> float:
+    """Compute the upper cutoff for the GLRT test statistic."""
+    return get_cutoff(alpha=alpha, N=N)
