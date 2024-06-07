@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from numpy.typing import DTypeLike
+from numpy.typing import ArrayLike, DTypeLike
 from tqdm.auto import tqdm
 
 from dolphin import io, shp
@@ -15,7 +15,12 @@ from dolphin._decorators import atomic_output
 from dolphin._log import get_log
 from dolphin._types import Filename, HalfWindow, Strides
 from dolphin.io import EagerLoader, StridedBlockManager, VRTStack
-from dolphin.phase_link import PhaseLinkRuntimeError, compress, run_phase_linking
+from dolphin.phase_link import (
+    PhaseLinkOutput,
+    PhaseLinkRuntimeError,
+    compress,
+    run_phase_linking,
+)
 from dolphin.stack import MiniStackInfo
 
 from .config import ShpMethod
@@ -79,9 +84,6 @@ def run_wrapped_phase_single(
     nodata_mask = _get_nodata_mask(mask_file, nrows, ncols)
     ps_mask = _get_ps_mask(ps_mask_file, nrows, ncols)
     amp_mean, amp_variance = _get_amp_mean_variance(amp_mean_file, amp_dispersion_file)
-    amp_stack: Optional[np.ndarray] = None
-
-    xhalf, yhalf = half_window["x"], half_window["y"]
 
     # If we were passed any compressed SLCs in `input_slc_files`,
     # then we want that index for when we create new compressed SLCs.
@@ -173,24 +175,29 @@ def run_wrapped_phase_single(
 
         if shp_method == "ks":
             # Only actually compute if we need this one
-            amp_stack = np.abs(cur_data)
+            np.abs(cur_data)
 
-        # Compute the neighbor_arrays for this block
-        neighbor_arrays = shp.estimate_neighbors(
-            halfwin_rowcol=(yhalf, xhalf),
-            alpha=shp_alpha,
-            strides=strides,
-            mean=amp_mean[in_rows, in_cols] if amp_mean is not None else None,
-            var=amp_variance[in_rows, in_cols] if amp_variance is not None else None,
-            nslc=shp_nslc,
-            amp_stack=amp_stack,
-            method=shp_method,
-        )
         # Run the phase linking process on the current ministack
         reference_idx = max(0, first_real_slc_idx - 1)
+        # Compute the neighbor_arrays for this block
+
+        # neighbor_arrays = shp.estimate_neighbors(
+        #     halfwin_rowcol=(yhalf, xhalf),
+        #     alpha=shp_alpha,
+        #     strides=strides,
+        #     mean=amp_mean[in_rows, in_cols] if amp_mean is not None else None,
+        #     var=amp_variance[in_rows, in_cols] if amp_variance is not None else None,
+        #     nslc=shp_nslc,
+        #     amp_stack=amp_stack,
+        #     method=shp_method,
+        # )
         try:
-            pl_output = run_phase_linking(
+            pl_output = process_block(
                 cur_data,
+                amp_mean=amp_mean[in_rows, in_cols] if amp_mean is not None else None,
+                amp_variance=amp_variance[in_rows, in_cols]
+                if amp_variance is not None
+                else None,
                 half_window=half_window_tup,
                 strides=strides_tup,
                 use_evd=use_evd,
@@ -198,8 +205,9 @@ def run_wrapped_phase_single(
                 reference_idx=reference_idx,
                 nodata_mask=nodata_mask[in_rows, in_cols],
                 ps_mask=ps_mask[in_rows, in_cols],
-                neighbor_arrays=neighbor_arrays,
-                avg_mag=amp_mean[in_rows, in_cols] if amp_mean is not None else None,
+                shp_alpha=shp_alpha,
+                shp_method=shp_method,
+                shp_nslc=shp_nslc,
             )
         except PhaseLinkRuntimeError as e:
             # note: this is a warning instead of info, since it should
@@ -314,7 +322,7 @@ def _get_ps_mask(
 def _get_amp_mean_variance(
     amp_mean_file: Optional[Filename],
     amp_dispersion_file: Optional[Filename],
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     if amp_mean_file is not None and amp_dispersion_file is not None:
         # Note: have to fill, since numba (as of 0.57) can't do masked arrays
         amp_mean = io.load_gdal(amp_mean_file, masked=True).filled(np.nan)
@@ -398,3 +406,46 @@ def setup_output_folder(
 
         phase_linked_slc_files.append(output_path)
     return phase_linked_slc_files
+
+
+def process_block(
+    cur_data: ArrayLike,
+    amp_mean: Optional[ArrayLike],
+    amp_variance: Optional[ArrayLike],
+    ps_mask: ArrayLike,
+    nodata_mask: ArrayLike,
+    half_window: HalfWindow,
+    strides: Strides,
+    use_evd: bool,
+    beta: float,
+    shp_alpha: float,
+    shp_nslc: int,
+    reference_idx: int,
+    shp_method: ShpMethod,
+    amp_stack: ArrayLike | None = None,
+) -> PhaseLinkOutput:
+    """Process a block of data using phase linking."""
+    # Compute the neighbor_arrays for this block
+
+    neighbor_arrays = shp.estimate_neighbors(
+        half_window=half_window,
+        alpha=shp_alpha,
+        strides=strides,
+        mean=amp_mean,
+        var=amp_variance,
+        nslc=shp_nslc,
+        amp_stack=amp_stack,
+        method=shp_method,
+    )
+    return run_phase_linking(
+        cur_data,
+        half_window=half_window,
+        strides=strides,
+        use_evd=use_evd,
+        beta=beta,
+        reference_idx=reference_idx,
+        nodata_mask=nodata_mask,
+        ps_mask=ps_mask,
+        neighbor_arrays=neighbor_arrays,
+        avg_mag=amp_mean,
+    )
