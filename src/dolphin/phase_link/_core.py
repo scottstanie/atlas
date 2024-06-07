@@ -223,6 +223,17 @@ def run_phase_linking(
     )
 
 
+@partial(
+    jit,
+    static_argnames=(
+        "half_window",
+        "strides",
+        "use_evd",
+        "beta",
+        "reference_idx",
+        "calc_average_coh",
+    ),
+)
 def run_cpl(
     slc_stack: np.ndarray,
     half_window: HalfWindow,
