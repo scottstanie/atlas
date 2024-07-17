@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import numpy as np
 from numpy.typing import ArrayLike
 from scipy import ndimage
@@ -38,120 +40,28 @@ def filter_long_wavelength(
 
     """
     nrow, ncol = correlation.shape
-
-    mask = (correlation > mask_cutoff).astype("bool")
-
-    # Create Boolean mask for Zero-filled boundary area to be False
-    # and the rest to be True
-    mask_boundary = ~(correlation == 0).astype("bool")
+    mask = (correlation > mask_cutoff).astype(bool)
+    mask_boundary = ~(correlation == 0).astype(bool)
 
     plane = fit_ramp_plane(unwrapped_phase, mask)
-
-    # Replace masked out pixels with the ramp plane
     unw_ifg_interp = np.copy(unwrapped_phase)
     unw_ifg_interp[~mask * mask_boundary] = plane[~mask * mask_boundary]
 
-    # Copy the edge pixels for the boundary area before filling them by reflection
-    EV_fill = np.copy(unw_ifg_interp)
+    reflect_fill = _fill_boundary_area(unw_ifg_interp, mask)
 
-    Xdata = np.argwhere(mask)  # Get indices of non-NaN & masked pixels
-    NW = Xdata[np.argmin(Xdata[:, 0])]  # Get indices of upper left corner pixel
-    SE = Xdata[np.argmax(Xdata[:, 0])]  # Get indices of lower right corner pixel
-    SW = Xdata[np.argmin(Xdata[:, 1])]  # Get indices of lower left corner pixel
-    NE = Xdata[np.argmax(Xdata[:, 1])]  # Get indices of upper left corner pixel
-
-    for k in range(NW[1], NE[1] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[0 : NE[0] + 1, k] == 0
-        )  # count zeros in North direction
-        if n_zeros == 0:
-            continue
-        EV_fill[0:n_zeros, k] = EV_fill[n_zeros, k]
-    for k in range(SW[1], SE[1] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[SW[0] + 1 :, k] == 0
-        )  # count zeros in South direction
-        if n_zeros == 0:
-            continue
-        EV_fill[-n_zeros:, k] = EV_fill[-n_zeros - 1, k]
-    for k in range(NW[0], SW[0] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[k, 0 : NW[1] + 1] == 0
-        )  # count zeros in North direction
-        if n_zeros == 0:
-            continue
-        EV_fill[k, 0:n_zeros] = EV_fill[k, n_zeros]
-    for k in range(NE[0], SE[0] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[k, SE[1] + 1 :] == 0
-        )  # count zeros in North direction
-        if n_zeros == 0:
-            continue
-        EV_fill[k, -n_zeros:] = EV_fill[k, -n_zeros - 1]
-
-    # Fill the boundary area reflecting the pixel values
-    Reflect_fill = np.copy(EV_fill)
-
-    for k in range(NW[1], NE[1] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[0 : NE[0] + 1, k] == 0
-        )  # count zeros in North direction
-        if n_zeros == 0:
-            continue
-        Reflect_fill[0:n_zeros, k] = np.flipud(EV_fill[n_zeros : n_zeros + n_zeros, k])
-    for k in range(SW[1], SE[1] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[SW[0] + 1 :, k] == 0
-        )  # count zeros in South direction
-        if n_zeros == 0:
-            continue
-        Reflect_fill[-n_zeros:, k] = np.flipud(
-            EV_fill[-n_zeros - n_zeros : -n_zeros, k]
-        )
-    for k in range(NW[0], SW[0] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[k, 0 : NW[1] + 1] == 0
-        )  # count zeros in North direction
-        if n_zeros == 0:
-            continue
-        Reflect_fill[k, 0:n_zeros] = np.flipud(EV_fill[k, n_zeros : n_zeros + n_zeros])
-    for k in range(NE[0], SE[0] + 1):
-        n_zeros = np.count_nonzero(
-            unw_ifg_interp[k, SE[1] + 1 :] == 0
-        )  # count zeros in North direction
-        if n_zeros == 0:
-            continue
-        Reflect_fill[k, -n_zeros:] = np.flipud(
-            EV_fill[k, -n_zeros - n_zeros : -n_zeros]
-        )
-
-    Reflect_fill[0 : NW[0], 0 : NW[1]] = np.flipud(
-        Reflect_fill[NW[0] : NW[0] + NW[0], 0 : NW[1]]
-    )  # upper left corner area
-    Reflect_fill[0 : NE[0], NE[1] + 1 :] = np.fliplr(
-        Reflect_fill[0 : NE[0], NE[1] + 1 - (ncol - NE[1] - 1) : NE[1] + 1]
-    )  # upper right corner area
-    Reflect_fill[SW[0] + 1 :, 0 : SW[1]] = np.fliplr(
-        Reflect_fill[SW[0] + 1 :, SW[1] : SW[1] + SW[1]]
-    )  # lower left corner area
-    Reflect_fill[SE[0] + 1 :, SE[1] + 1 :] = np.flipud(
-        Reflect_fill[SE[0] + 1 - (nrow - SE[0] - 1) : SE[0] + 1, SE[1] + 1 :]
-    )  # lower right corner area
-
-    # 2D filtering with Gaussian kernel
-    # wavelength_cutoff: float = 50*1e3,
-    # dx: float = 30,
-    cutoff_value = 0.5  # 0 < cutoff_value < 1
-    sigma_f = (
-        1 / wavelength_cutoff / np.sqrt(np.log(1 / cutoff_value))
-    )  # fc = sqrt(ln(1/cutoff_value))*sigma_f
-    sigma_x = 1 / np.pi / 2 / sigma_f
-    sigma = sigma_x / pixel_spacing
-
-    lowpass_filtered = ndimage.gaussian_filter(Reflect_fill, sigma)
+    sigma = _get_filter_cutoff(wavelength_cutoff, pixel_spacing)
+    lowpass_filtered = ndimage.gaussian_filter(reflect_fill, sigma)
     filtered_ifg = unwrapped_phase - lowpass_filtered * mask_boundary
 
     return filtered_ifg
+
+
+def _get_filter_cutoff(wavelength_cutoff: float, pixel_spacing: float) -> np.ndarray:
+    """Find the Gaussian filter to remove long wavelength signals."""
+    cutoff_value = 0.5
+    sigma_f = 1 / wavelength_cutoff / np.sqrt(np.log(1 / cutoff_value))
+    sigma_x = 1 / np.pi / 2 / sigma_f
+    return sigma_x / pixel_spacing
 
 
 def fit_ramp_plane(unw_ifg: ArrayLike, mask: ArrayLike) -> np.ndarray:
@@ -192,3 +102,163 @@ def fit_ramp_plane(unw_ifg: ArrayLike, mask: ArrayLike) -> np.ndarray:
     plane = np.reshape(X_ @ theta, (nrow, ncol))
 
     return plane
+
+
+def _fill_boundary_area(unw_ifg_interp: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Fill the boundary area by reflecting pixel values."""
+    edge_filled = _fill_edge_values(unw_ifg_interp, mask)
+    reflect_filled = _reflect_boundary_values(edge_filled, unw_ifg_interp, mask)
+    return reflect_filled
+
+
+def _fill_edge_values(unw_ifg_interp: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Fill edge values of the boundary area."""
+    edge_filled = np.copy(unw_ifg_interp)
+    corner_indices = _get_corner_indices(mask)
+
+    for direction in ["north", "south", "west", "east"]:
+        edge_filled = _fill_direction(
+            edge_filled, unw_ifg_interp, corner_indices, direction
+        )
+
+    return edge_filled
+
+
+def _reflect_boundary_values(
+    edge_filled: np.ndarray, unw_ifg_interp: np.ndarray, mask: np.ndarray
+) -> np.ndarray:
+    """Reflect boundary values to fill the boundary area."""
+    reflect_filled = np.copy(edge_filled)
+    corner_indices = _get_corner_indices(mask)
+
+    for direction in ["north", "south", "west", "east"]:
+        reflect_filled = _reflect_direction(
+            reflect_filled, edge_filled, unw_ifg_interp, corner_indices, direction
+        )
+
+    reflect_filled = _fill_corner_areas(reflect_filled, corner_indices)
+
+    return reflect_filled
+
+
+def _get_corner_indices(mask: np.ndarray) -> dict[str, np.ndarray]:
+    """Get indices of corner pixels."""
+    valid_pixels = np.argwhere(mask)
+    return {
+        "nw": valid_pixels[np.argmin(valid_pixels[:, 0])],
+        "se": valid_pixels[np.argmax(valid_pixels[:, 0])],
+        "sw": valid_pixels[np.argmin(valid_pixels[:, 1])],
+        "ne": valid_pixels[np.argmax(valid_pixels[:, 1])],
+    }
+
+
+def _fill_direction(
+    arr: np.ndarray,
+    original: np.ndarray,
+    corners: Mapping[str, np.ndarray],
+    direction: str,
+) -> np.ndarray:
+    """Fill edge values for a specific direction."""
+    if direction == "north":
+        start, end = corners["nw"][1], corners["ne"][1] + 1
+        for col in range(start, end):
+            zero_count = np.count_nonzero(original[: corners["ne"][0] + 1, col] == 0)
+            if zero_count > 0:
+                arr[:zero_count, col] = arr[zero_count, col]
+    elif direction == "south":
+        start, end = corners["sw"][1], corners["se"][1] + 1
+        for col in range(start, end):
+            zero_count = np.count_nonzero(original[corners["sw"][0] + 1 :, col] == 0)
+            if zero_count > 0:
+                arr[-zero_count:, col] = arr[-zero_count - 1, col]
+    elif direction == "west":
+        start, end = corners["nw"][0], corners["sw"][0] + 1
+        for row in range(start, end):
+            zero_count = np.count_nonzero(original[row, : corners["nw"][1] + 1] == 0)
+            if zero_count > 0:
+                arr[row, :zero_count] = arr[row, zero_count]
+    elif direction == "east":
+        start, end = corners["ne"][0], corners["se"][0] + 1
+        for row in range(start, end):
+            zero_count = np.count_nonzero(original[row, corners["se"][1] + 1 :] == 0)
+            if zero_count > 0:
+                arr[row, -zero_count:] = arr[row, -zero_count - 1]
+    return arr
+
+
+def _reflect_direction(
+    reflect: np.ndarray,
+    edge: np.ndarray,
+    original: np.ndarray,
+    corners: Mapping[str, np.ndarray],
+    direction: str,
+) -> np.ndarray:
+    """Reflect boundary values for a specific direction."""
+    if direction == "north":
+        start, end = corners["nw"][1], corners["ne"][1] + 1
+        for col in range(start, end):
+            zero_count = np.count_nonzero(original[: corners["ne"][0] + 1, col] == 0)
+            if zero_count > 0:
+                reflect[:zero_count, col] = np.flipud(
+                    edge[zero_count : zero_count * 2, col]
+                )
+    elif direction == "south":
+        start, end = corners["sw"][1], corners["se"][1] + 1
+        for col in range(start, end):
+            zero_count = np.count_nonzero(original[corners["sw"][0] + 1 :, col] == 0)
+            if zero_count > 0:
+                reflect[-zero_count:, col] = np.flipud(
+                    edge[-zero_count * 2 : -zero_count, col]
+                )
+    elif direction == "west":
+        start, end = corners["nw"][0], corners["sw"][0] + 1
+        for row in range(start, end):
+            zero_count = np.count_nonzero(original[row, : corners["nw"][1] + 1] == 0)
+            if zero_count > 0:
+                reflect[row, :zero_count] = np.flipud(
+                    edge[row, zero_count : zero_count * 2]
+                )
+    elif direction == "east":
+        start, end = corners["ne"][0], corners["se"][0] + 1
+        for row in range(start, end):
+            zero_count = np.count_nonzero(original[row, corners["se"][1] + 1 :] == 0)
+            if zero_count > 0:
+                reflect[row, -zero_count:] = np.flipud(
+                    edge[row, -zero_count * 2 : -zero_count]
+                )
+    return reflect
+
+
+def _fill_corner_areas(
+    reflect: np.ndarray, corners: Mapping[str, np.ndarray]
+) -> np.ndarray:
+    """Fill corner areas of the boundary."""
+    nrow, ncol = reflect.shape
+
+    # Upper left corner
+    reflect[: corners["nw"][0], : corners["nw"][1]] = np.flipud(
+        reflect[corners["nw"][0] : corners["nw"][0] * 2, : corners["nw"][1]]
+    )
+
+    # Upper right corner
+    reflect[: corners["ne"][0], corners["ne"][1] + 1 :] = np.fliplr(
+        reflect[
+            : corners["ne"][0],
+            corners["ne"][1] + 1 - (ncol - corners["ne"][1] - 1) : corners["ne"][1] + 1,
+        ]
+    )
+
+    # Lower left corner
+    reflect[corners["sw"][0] + 1 :, : corners["sw"][1]] = np.fliplr(
+        reflect[corners["sw"][0] + 1 :, corners["sw"][1] : corners["sw"][1] * 2]
+    )
+
+    # Lower right corner
+    reflect[corners["se"][0] + 1 :, corners["se"][1] + 1 :] = np.flipud(
+        reflect[
+            corners["se"][0] + 1 - (nrow - corners["se"][0] - 1) : corners["se"][0] + 1,
+            corners["se"][1] + 1 :,
+        ]
+    )
+
+    return reflect
