@@ -81,25 +81,25 @@ def fit_ramp_plane(unw_ifg: ArrayLike, mask: ArrayLike) -> np.ndarray:
 
     """
     # Extract data for non-NaN & masked pixels
-    Y = unw_ifg[mask]
-    Xdata = np.argwhere(mask)  # Get indices of non-NaN & masked pixels
+    y = unw_ifg[mask]
+    nonzero_idxs = np.argwhere(mask)  # Get indices of non-NaN & masked pixels
 
     # Include the intercept term (bias) in the model
-    X = np.c_[np.ones((len(Xdata))), Xdata]
+    x = np.c_[np.ones((len(nonzero_idxs))), nonzero_idxs]
 
     # Compute the parameter vector theta using the least squares solution
-    theta = np.linalg.pinv(X.T @ X) @ X.T @ Y
+    theta = np.linalg.pinv(x.T @ x) @ x.T @ y
 
     # Prepare grid for the entire image
     nrow, ncol = unw_ifg.shape
-    X1_, X2_ = np.mgrid[:nrow, :ncol]
-    X_ = np.hstack(
-        (np.reshape(X1_, (nrow * ncol, 1)), np.reshape(X2_, (nrow * ncol, 1)))
+    x1, x2 = np.mgrid[:nrow, :ncol]
+    coeffs = np.hstack(
+        (np.reshape(x1, (nrow * ncol, 1)), np.reshape(x2, (nrow * ncol, 1)))
     )
-    X_ = np.hstack((np.ones((nrow * ncol, 1)), X_))
+    coeffs = np.hstack((np.ones((nrow * ncol, 1)), coeffs))
 
     # Compute the fitted plane
-    plane = np.reshape(X_ @ theta, (nrow, ncol))
+    plane = np.reshape(coeffs @ theta, (nrow, ncol))
 
     return plane
 
