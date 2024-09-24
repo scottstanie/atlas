@@ -2,25 +2,23 @@
 from __future__ import annotations
 
 import logging
-
-# import contextlib
 import multiprocessing as mp
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
-from opera_utils import group_by_burst, group_by_date  # , get_dates
+from opera_utils import group_by_burst
 from tqdm.auto import tqdm
 
-from dolphin import __version__, io, timeseries, utils
+from dolphin import __version__, timeseries, utils
 from dolphin._log import log_runtime, setup_logging
 from dolphin.timeseries import ReferencePoint
 from dolphin.workflows import CallFunc
 
 from . import stitching_bursts, unwrapping, wrapped_phase
-from ._utils import _create_burst_cfg, _remove_dir_if_empty, parse_ionosphere_files
-from .config import DisplacementWorkflow  # , TimeseriesOptions
+from ._utils import _create_burst_cfg, _remove_dir_if_empty
+from .config import DisplacementWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +36,6 @@ class OutputPaths(NamedTuple):
     unwrapped_paths: list[Path] | None
     conncomp_paths: list[Path] | None
     timeseries_paths: list[Path] | None
-    tropospheric_corrections: list[Path] | None
-    ionospheric_corrections: list[Path] | None
     reference_point: ReferencePoint | None
 
 
@@ -88,10 +84,6 @@ def run(
         grouped_amp_mean_files = group_by_burst(cfg.amplitude_mean_files)
     else:
         grouped_amp_mean_files = defaultdict(list)
-
-    grouped_iono_files = parse_ionosphere_files(
-        cfg.correction_options.ionosphere_files, cfg.correction_options._iono_date_fmt
-    )
 
     # ######################################
     # 1. Burst-wise Wrapped phase estimation
@@ -215,8 +207,6 @@ def run(
             unwrapped_paths=None,
             conncomp_paths=None,
             timeseries_paths=None,
-            tropospheric_corrections=None,
-            ionospheric_corrections=None,
             reference_point=None,
         )
 
@@ -265,85 +255,6 @@ def run(
         timeseries_paths = None
         reference_point = None
 
-    # ##############################################
-    # 5. Estimate corrections for each interferogram
-    # ##############################################
-    tropo_paths: list[Path] | None = None
-    iono_paths: list[Path] | None = None
-    if len(cfg.correction_options.geometry_files) > 0:
-        out_dir = cfg.work_directory / cfg.correction_options._atm_directory
-        out_dir.mkdir(exist_ok=True)
-        grouped_slc_files = group_by_date(cfg.cslc_file_list)
-
-        # Prepare frame geometry files
-        geometry_dir = out_dir / "geometry"
-        geometry_dir.mkdir(exist_ok=True)
-        assert timeseries_paths is not None
-        crs = io.get_raster_crs(timeseries_paths[0])
-        epsg = crs.to_epsg()
-        out_bounds = io.get_raster_bounds(timeseries_paths[0])
-        frame_geometry_files = utils.prepare_geometry(
-            geometry_dir=geometry_dir,
-            geo_files=cfg.correction_options.geometry_files,
-            matching_file=timeseries_paths[0],
-            dem_file=cfg.correction_options.dem_file,
-            epsg=epsg,
-            out_bounds=out_bounds,
-            strides=cfg.output_options.strides,
-        )
-
-        # Troposphere
-        if "height" not in frame_geometry_files:
-            logger.warning(
-                "DEM file is not given, skip estimating tropospheric corrections."
-            )
-        else:
-            if cfg.correction_options.troposphere_files:
-                from dolphin.atmosphere import estimate_tropospheric_delay
-
-                assert timeseries_paths is not None
-                logger.info(
-                    "Calculating tropospheric corrections for %s files.",
-                    len(timeseries_paths),
-                )
-                tropo_paths = estimate_tropospheric_delay(
-                    ifg_file_list=timeseries_paths,
-                    troposphere_files=cfg.correction_options.troposphere_files,
-                    file_date_fmt=cfg.correction_options.tropo_date_fmt,
-                    slc_files=grouped_slc_files,
-                    geom_files=frame_geometry_files,
-                    reference_point=reference_point,
-                    output_dir=out_dir,
-                    tropo_model=cfg.correction_options.tropo_model,
-                    tropo_delay_type=cfg.correction_options.tropo_delay_type,
-                    epsg=epsg,
-                    bounds=out_bounds,
-                )
-            else:
-                logger.info("No weather model, skip tropospheric correction.")
-
-        # Ionosphere
-        if grouped_iono_files:
-            from dolphin.atmosphere import estimate_ionospheric_delay
-
-            logger.info(
-                "Calculating ionospheric corrections for %s files",
-                len(timeseries_paths),
-            )
-            assert timeseries_paths is not None
-            iono_paths = estimate_ionospheric_delay(
-                ifg_file_list=timeseries_paths,
-                slc_files=grouped_slc_files,
-                tec_files=grouped_iono_files,
-                geom_files=frame_geometry_files,
-                reference_point=reference_point,
-                output_dir=out_dir,
-                epsg=epsg,
-                bounds=out_bounds,
-            )
-        else:
-            logger.info("No TEC files, skip ionospheric correction.")
-
     # Print the maximum memory usage for each worker
     _print_summary(cfg)
     return OutputPaths(
@@ -362,8 +273,6 @@ def run(
         # unwrapped_paths=inverted_phase_paths,
         conncomp_paths=conncomp_paths,
         timeseries_paths=timeseries_paths,
-        tropospheric_corrections=tropo_paths,
-        ionospheric_corrections=iono_paths,
         reference_point=reference_point,
     )
 
