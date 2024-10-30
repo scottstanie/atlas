@@ -177,6 +177,8 @@ def run(
             num_threads=num_threads,
             wavelength=wavelength,
             method=method,
+            # TODO:
+            # conncomp_paths=conncomp_paths,
         )
         if extra_reference_date is None:
             final_ts_paths = inverted_phase_paths
@@ -532,12 +534,17 @@ def estimate_velocity_pixel(x: ArrayLike, y: ArrayLike, w: ArrayLike) -> Array:
 
     Returns
     -------
-    velocity : np.array, 0D
+    velocity : jnp.array, 0D
         The estimated velocity in (unw unit) / year.
+    covariance : jnp.array, 2D
+        covariance matrix of estimated coefficients.
+        Assuming that the weights are w = 1/sigma, with sigma known to be a
+        reliable estimate of the uncertainty of the data points.
 
     """
     # Jax polyfit will grab the first *2* dimensions of y to solve in a batch
-    return jnp.polyfit(x, y, deg=1, w=w.reshape(y.shape), rcond=None)[0]
+    # return jnp.polyfit(x, y, deg=1, w=w.reshape(y.shape), rcond=None)[0]
+    return linear_fit(x, y, w=w.reshape(y.shape))[0]
 
 
 @jit
@@ -582,7 +589,7 @@ def estimate_velocity(
 
         weights_pixels = weight_stack.reshape(n_time, 1, -1)
 
-        velos = vmap(estimate_velocity_pixel, in_axes=(None, -1, -1))(
+        velos, covs = vmap(estimate_velocity_pixel, in_axes=(None, -1, -1))(
             x_arr, unw_pixels, weights_pixels
         )
     # Currently `velos` is in units / day,
@@ -1230,3 +1237,53 @@ def invert_stack_l1(A: ArrayLike, dphi: ArrayLike) -> Array:
     # residuals = jnp.sum(residual_vecs, axis=0)
 
     return phase, residuals
+
+
+def linear_fit(x: ArrayLike, y: ArrayLike, w: ArrayLike | None = None):
+    deg = 1
+    order = deg + 1
+    # check arguments
+    x_arr, y_arr = jnp.asarray(x), jnp.asarray(y)
+    del x, y
+    if deg < 0:
+        raise ValueError("expected deg >= 0")
+    if x_arr.ndim != 1:
+        raise TypeError("expected 1D vector for x")
+    if x_arr.size == 0:
+        raise TypeError("expected non-empty vector for x")
+    if y_arr.ndim < 1 or y_arr.ndim > 2:
+        raise TypeError("expected 1D or 2D array for y")
+    if x_arr.shape[0] != y_arr.shape[0]:
+        raise TypeError("expected x and y to have same length")
+
+    # set rcond
+    rcond = len(x_arr) * jnp.finfo(x_arr.dtype).eps
+    # set up least squares equation for powers of x
+    lhs = jnp.vander(x_arr, order)
+    rhs = y_arr
+
+    # apply weighting
+    if w is not None:
+        w_arr = jnp.asarray(w)
+        if w_arr.ndim != 1:
+            raise TypeError("expected a 1-d array for weights")
+        if w_arr.shape[0] != y_arr.shape[0]:
+            raise TypeError("expected w and y to have the same length")
+        lhs *= w_arr[:, np.newaxis]
+        if rhs.ndim == 2:
+            rhs *= w_arr[:, np.newaxis]
+        else:
+            rhs *= w_arr
+
+    # scale lhs to improve condition number and solve
+    scale = jnp.sqrt((lhs * lhs).sum(axis=0))
+    lhs /= scale[np.newaxis, :]
+    c, resids, rank, s = jnp.linalg.lstsq(lhs, rhs, rcond)
+    c = (c.T / scale).T  # broadcast scale coefficients
+
+    Vbase = jnp.linalg.inv(jnp.dot(lhs.T, lhs))
+    Vbase /= jnp.outer(scale, scale)
+    if y_arr.ndim == 1:
+        return c, Vbase
+    else:
+        return c, Vbase[:, :, np.newaxis]

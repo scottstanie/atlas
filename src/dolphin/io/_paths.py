@@ -185,7 +185,7 @@ class S3Path(GeneralPath):
         return self.get_path()
 
     def to_gdal(self):
-        """Convert this S3Path to a GDAL URL."""
+        """Convert this S3Path to a GDAL /vsis3 URL."""
         return f"/vsis3/{self.bucket}/{self.key}"
 
 
