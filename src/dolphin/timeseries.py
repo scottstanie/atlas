@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Callable, Optional, Protocol, Sequence, TypeVar
@@ -544,12 +545,16 @@ def estimate_velocity_pixel(x: ArrayLike, y: ArrayLike, w: ArrayLike) -> Array:
     """
     # Jax polyfit will grab the first *2* dimensions of y to solve in a batch
     # return jnp.polyfit(x, y, deg=1, w=w.reshape(y.shape), rcond=None)[0]
-    return linear_fit(x, y, w=w.reshape(y.shape))[0]
+    coeffs, covs = linear_fit(x, y, w=w.reshape(y.shape))
+    return coeffs[0], covs
 
 
-@jit
+@partial(jit, static_argnames=["return_cov"])
 def estimate_velocity(
-    x_arr: ArrayLike, unw_stack: ArrayLike, weight_stack: ArrayLike | None
+    x_arr: ArrayLike,
+    unw_stack: ArrayLike,
+    weight_stack: ArrayLike | None,
+    return_cov: bool = True,
 ) -> Array:
     """Estimate the velocity from a stack of unwrapped interferograms.
 
@@ -569,11 +574,14 @@ def estimate_velocity(
     velocity : np.array 2D
         The estimated velocity in (unw unit) / year calculated as 365.25 * rad/day.
         E.g. if the unwrapped phase is in radians, the velocity is in rad/year.
+    covar
 
     """
     # TODO: weighted least squares using correlation?
     n_time, n_rows, n_cols = unw_stack.shape
-
+    # Vbase = jnp.linalg.inv(jnp.dot(lhs.T, lhs))
+    # Vbase /= jnp.outer(scale, scale)
+    # return c, Vbase
     unw_pixels = unw_stack.reshape(n_time, -1)
     if weight_stack is None:
         # For jnp.polyfit(...), coeffs[0] is slope, coeffs[1] is the intercept
@@ -1239,7 +1247,10 @@ def invert_stack_l1(A: ArrayLike, dphi: ArrayLike) -> Array:
     return phase, residuals
 
 
-def linear_fit(x: ArrayLike, y: ArrayLike, w: ArrayLike | None = None):
+@partial(jit, static_argnames=["return_cov"])
+def linear_fit(
+    x: ArrayLike, y: ArrayLike, w: ArrayLike | None = None, return_cov: bool = True
+):
     deg = 1
     order = deg + 1
     # check arguments
@@ -1280,10 +1291,9 @@ def linear_fit(x: ArrayLike, y: ArrayLike, w: ArrayLike | None = None):
     lhs /= scale[np.newaxis, :]
     c, resids, rank, s = jnp.linalg.lstsq(lhs, rhs, rcond)
     c = (c.T / scale).T  # broadcast scale coefficients
+    if not return_cov:
+        return c
 
     Vbase = jnp.linalg.inv(jnp.dot(lhs.T, lhs))
     Vbase /= jnp.outer(scale, scale)
-    if y_arr.ndim == 1:
-        return c, Vbase
-    else:
-        return c, Vbase[:, :, np.newaxis]
+    return c, Vbase

@@ -76,11 +76,11 @@ def get_parser(subparser=None, subcommand_name="timeseries") -> argparse.Argumen
     parser.add_argument(
         "--method",
         type=InversionMethod,
-        choices=list(InversionMethod),
-        default=InversionMethod.L1,
+        choices=[m.value for m in InversionMethod],
+        default=InversionMethod.L1.value,
         help=(
             "Inversion method to use when solving Ax = b. L2 uses least squares"
-            " (faster), L1 minimizes |Ax - b|_1"
+            " (faster), L1 minimizes sum(|Ax - b|)"
         ),
     )
     parser.add_argument(
